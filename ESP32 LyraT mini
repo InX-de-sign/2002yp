@@ -1,0 +1,119 @@
+#include <stdio.h>
+#include <string.h>
+#include "esp_log.h"
+#include "esp_http_client.h"
+#include "audio_pipeline.h"
+#include "audio_element.h"
+#include "i2s_stream.h"
+#include "raw_stream.h"
+#include "filter_resample.h"
+#include "esp_peripherals.h"
+#include "periph_wifi.h"
+#include "board.h"
+
+// Replace with your Wi-Fi credentials
+#define WIFI_SSID "your_SSID"
+#define WIFI_PASSWORD "your_PASSWORD"
+
+// Replace with your Google Cloud API key
+#define API_KEY "your_GOOGLE_CLOUD_API_KEY"
+
+static const char *TAG = "SPEECH_TO_TEXT";
+
+// Audio pipeline
+audio_pipeline_handle_t pipeline;
+audio_element_handle_t i2s_reader, raw_writer;
+
+// Function to send audio data to Google Cloud Speech-to-Text API
+void send_audio_to_google(const char *audio_data, size_t audio_size) {
+    esp_http_client_config_t config = {
+        .url = "https://speech.googleapis.com/v1/speech:recognize?key=" API_KEY,
+        .method = HTTP_METHOD_POST,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+
+    // Create JSON payload
+    char *payload = NULL;
+    asprintf(&payload,
+             "{\"config\":{\"encoding\":\"LINEAR16\",\"sampleRateHertz\":16000,\"languageCode\":\"en-US\"},"
+             "\"audio\":{\"content\":\"%.*s\"}}",
+             audio_size, audio_data);
+
+    esp_http_client_set_post_field(client, payload, strlen(payload));
+    esp_err_t err = esp_http_client_perform(client);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP Status: %d", esp_http_client_get_status_code(client));
+        char *response = malloc(esp_http_client_get_content_length(client) + 1);
+        esp_http_client_read(client, response, esp_http_client_get_content_length(client));
+        ESP_LOGI(TAG, "Response: %s", response);
+        free(response);
+    } else {
+        ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
+    }
+
+    esp_http_client_cleanup(client);
+    free(payload);
+}
+
+void app_main() {
+    // Initialize Wi-Fi
+    periph_wifi_cfg_t wifi_cfg = {
+        .ssid = WIFI_SSID,
+        .password = WIFI_PASSWORD,
+    };
+    esp_periph_config_t periph_cfg = { 0 };
+    esp_periph_init(&periph_cfg);
+    esp_periph_handle_t wifi_handle = periph_wifi_init(&wifi_cfg);
+    esp_periph_start(wifi_handle);
+
+    // Wait for Wi-Fi connection
+    while (!periph_wifi_is_connected(wifi_handle)) {
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+
+    // Initialize audio pipeline
+    audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
+    pipeline = audio_pipeline_init(&pipeline_cfg);
+
+    // Configure I2S stream for microphone input
+    i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
+    i2s_cfg.type = AUDIO_STREAM_READER;
+    i2s_reader = i2s_stream_init(&i2s_cfg);
+
+    // Configure raw stream for audio data
+    raw_stream_cfg_t raw_cfg = RAW_STREAM_CFG_DEFAULT();
+    raw_cfg.type = AUDIO_STREAM_WRITER;
+    raw_writer = raw_stream_init(&raw_cfg);
+
+    // Link elements in the pipeline
+    audio_pipeline_register(pipeline, i2s_reader, "i2s");
+    audio_pipeline_register(pipeline, raw_writer, "raw");
+    audio_pipeline_link(pipeline, (const char *[]) {"i2s", "raw"}, 2);
+
+    // Start the pipeline
+    audio_pipeline_run(pipeline);
+
+    // Record audio for 5 seconds
+    ESP_LOGI(TAG, "Recording audio...");
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
+
+    // Stop the pipeline
+    audio_pipeline_stop(pipeline);
+    audio_pipeline_wait_for_stop(pipeline);
+
+    // Read recorded audio data
+    char *audio_data = malloc(16000 * 2 * 5); // 16-bit, 16 kHz, 5 seconds
+    size_t audio_size = raw_stream_read(raw_writer, audio_data, 16000 * 2 * 5);
+
+    // Send audio data to Google Cloud Speech-to-Text API
+    send_audio_to_google(audio_data, audio_size);
+
+    // Clean up
+    free(audio_data);
+    audio_pipeline_unregister(pipeline, i2s_reader);
+    audio_pipeline_unregister(pipeline, raw_writer);
+    audio_pipeline_deinit(pipeline);
+}

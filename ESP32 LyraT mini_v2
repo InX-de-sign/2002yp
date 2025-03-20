@@ -1,0 +1,159 @@
+#include <stdio.h>
+#include <string.h>
+#include "esp_log.h"
+#include "esp_wifi.h"
+#include "esp_http_client.h"
+#include "esp_system.h"
+#include "nvs_flash.h"
+#include "driver/i2s.h"
+#include "cJSON.h"
+
+// Replace with your network credentials
+#define WIFI_SSID "your_SSID"
+#define WIFI_PASSWORD "your_PASSWORD"
+
+// Replace with your Google Cloud API key and endpoint
+#define API_KEY "your_GOOGLE_CLOUD_API_KEY"
+#define SPEECH_TO_TEXT_URL "https://speech.googleapis.com/v1/speech:recognize?key=" API_KEY
+
+// I2S pins for external microphone
+#define I2S_MIC_SERIAL_CLOCK 14  // BCLK
+#define I2S_MIC_LEFT_RIGHT_CLOCK 15  // LRC
+#define I2S_MIC_SERIAL_DATA 32  // DOUT
+
+static const char *TAG = "SPEECH_TO_TEXT";
+
+// Function to initialize Wi-Fi
+void wifi_init(void) {
+    ESP_ERROR_CHECK(nvs_flash_init());
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASSWORD,
+        },
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    ESP_LOGI(TAG, "Connecting to Wi-Fi...");
+    esp_wifi_connect();
+    while (esp_wifi_sta_get_connect_status() != WIFI_CONNECTED) {
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+    ESP_LOGI(TAG, "Connected to Wi-Fi");
+}
+
+// Function to initialize I2S
+void i2s_init(void) {
+    i2s_config_t i2s_config = {
+        .mode = I2S_MODE_MASTER | I2S_MODE_RX,
+        .sample_rate = 16000,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+        .communication_format = I2S_COMM_FORMAT_I2S,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = 8,
+        .dma_buf_len = 64,
+        .use_apll = false,
+    };
+
+    i2s_pin_config_t pin_config = {
+        .bck_io_num = I2S_MIC_SERIAL_CLOCK,
+        .ws_io_num = I2S_MIC_LEFT_RIGHT_CLOCK,
+        .data_out_num = I2S_PIN_NO_CHANGE,
+        .data_in_num = I2S_MIC_SERIAL_DATA,
+    };
+
+    ESP_ERROR_CHECK(i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL));
+    ESP_ERROR_CHECK(i2s_set_pin(I2S_NUM_0, &pin_config));
+}
+
+// Function to record audio
+char* record_audio(size_t *audio_size) {
+    int16_t audio_buffer[512];
+    size_t bytes_read;
+    char *audio_data = malloc(512 * sizeof(int16_t));
+
+    if (audio_data == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for audio data");
+        return NULL;
+    }
+
+    i2s_read(I2S_NUM_0, audio_buffer, sizeof(audio_buffer), &bytes_read, portMAX_DELAY);
+    memcpy(audio_data, audio_buffer, bytes_read);
+
+    *audio_size = bytes_read;
+    return audio_data;
+}
+
+// Function to send audio to Google Cloud Speech-to-Text API
+void send_audio_to_api(const char *audio_data, size_t audio_size) {
+    esp_http_client_config_t config = {
+        .url = SPEECH_TO_TEXT_URL,
+        .method = HTTP_METHOD_POST,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+
+    // Create JSON payload
+    cJSON *root = cJSON_CreateObject();
+    cJSON *config_obj = cJSON_CreateObject();
+    cJSON *audio_obj = cJSON_CreateObject();
+
+    cJSON_AddStringToObject(config_obj, "encoding", "LINEAR16");
+    cJSON_AddNumberToObject(config_obj, "sampleRateHertz", 16000);
+    cJSON_AddStringToObject(config_obj, "languageCode", "en-US");
+
+    cJSON_AddStringToObject(audio_obj, "content", audio_data);
+
+    cJSON_AddItemToObject(root, "config", config_obj);
+    cJSON_AddItemToObject(root, "audio", audio_obj);
+
+    char *payload = cJSON_PrintUnformatted(root);
+    esp_http_client_set_post_field(client, payload, strlen(payload));
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP Status: %d", esp_http_client_get_status_code(client));
+        char *response = malloc(esp_http_client_get_content_length(client) + 1);
+        esp_http_client_read(client, response, esp_http_client_get_content_length(client));
+        ESP_LOGI(TAG, "Response: %s", response);
+        free(response);
+    } else {
+        ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
+    }
+
+    esp_http_client_cleanup(client);
+    cJSON_Delete(root);
+    free(payload);
+}
+
+void app_main(void) {
+    // Initialize Wi-Fi
+    wifi_init();
+
+    // Initialize I2S
+    i2s_init();
+
+    // Record audio
+    size_t audio_size;
+    char *audio_data = record_audio(&audio_size);
+    if (audio_data == NULL) {
+        ESP_LOGE(TAG, "Failed to record audio");
+        return;
+    }
+
+    // Send audio to Google Cloud Speech-to-Text API
+    send_audio_to_api(audio_data, audio_size);
+
+    // Free allocated memory
+    free(audio_data);
+}

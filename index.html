@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>3D model editor</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: transparent; }
+        canvas { display: block; width: 100vm; height: 100vh;}
+    </style>
+</head>
+<body>
+    <script>
+        window.modelPath = require('path').join(__dirname, 'models', 'sampleModel1.glb');
+    </script>
+    <script src="renderer.js"></script>
+</body>
+</html>

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>3D model editor</title>
+    <style>
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            background: #808080; 
+        }
+        canvas { 
+            display: block; 
+        }
+        #error-display {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            color: red;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            font-family: monospace;
+            z-index: 1000;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="error-display"></div>
+    <script>
+        window.onerror = function(msg, url, lineNo, columnNo, error) {
+            const display = document.getElementById('error-display');
+            display.style.display = 'block';
+            display.textContent = `Error: ${msg}\nAt: ${url}:${lineNo}`;
+            console.error('Error:', msg, url, lineNo, columnNo, error);
+        };
+    </script>
+    <script src="renderer.js"></script>
+</body>
+</html>
